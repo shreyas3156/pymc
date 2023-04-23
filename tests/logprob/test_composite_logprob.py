@@ -36,23 +36,24 @@
 
 import numpy as np
 import pytensor
-import pytensor.tensor as at
+import pytensor.tensor as pt
 import scipy.stats as st
 
+from pymc import logp
+from pymc.logprob.basic import factorized_joint_logprob
 from pymc.logprob.censoring import MeasurableClip
 from pymc.logprob.rewriting import construct_ir_fgraph
-from tests.helpers import assert_no_rvs
-from tests.logprob.utils import joint_logprob
+from pymc.testing import assert_no_rvs
 
 
 def test_scalar_clipped_mixture():
-    x = at.clip(at.random.normal(loc=1), 0.5, 1.5)
+    x = pt.clip(pt.random.normal(loc=1), 0.5, 1.5)
     x.name = "x"
-    y = at.random.beta(1, 2, name="y")
+    y = pt.random.beta(1, 2, name="y")
 
-    comps = at.stack([x, y])
+    comps = pt.stack([x, y])
     comps.name = "comps"
-    idxs = at.random.bernoulli(0.4, name="idxs")
+    idxs = pt.random.bernoulli(0.4, name="idxs")
     mix = comps[idxs]
     mix.name = "mix"
 
@@ -61,9 +62,10 @@ def test_scalar_clipped_mixture():
     idxs_vv = idxs.clone()
     idxs_vv.name = "idxs_val"
 
-    logp = joint_logprob({idxs: idxs_vv, mix: mix_vv})
+    logp = factorized_joint_logprob({idxs: idxs_vv, mix: mix_vv})
+    logp_combined = pt.sum([pt.sum(factor) for factor in logp.values()])
 
-    logp_fn = pytensor.function([idxs_vv, mix_vv], logp)
+    logp_fn = pytensor.function([idxs_vv, mix_vv], logp_combined)
     assert logp_fn(0, 0.4) == -np.inf
     assert np.isclose(logp_fn(0, 0.5), st.norm.logcdf(0.5, 1) + np.log(0.6))
     assert np.isclose(logp_fn(0, 1.3), st.norm.logpdf(1.3, 1) + np.log(0.6))
@@ -71,25 +73,25 @@ def test_scalar_clipped_mixture():
 
 
 def test_nested_scalar_mixtures():
-    x = at.random.normal(loc=-50, name="x")
-    y = at.random.normal(loc=50, name="y")
-    comps1 = at.stack([x, y])
+    x = pt.random.normal(loc=-50, name="x")
+    y = pt.random.normal(loc=50, name="y")
+    comps1 = pt.stack([x, y])
     comps1.name = "comps1"
-    idxs1 = at.random.bernoulli(0.5, name="idxs1")
+    idxs1 = pt.random.bernoulli(0.5, name="idxs1")
     mix1 = comps1[idxs1]
     mix1.name = "mix1"
 
-    w = at.random.normal(loc=-100, name="w")
-    z = at.random.normal(loc=100, name="z")
-    comps2 = at.stack([w, z])
+    w = pt.random.normal(loc=-100, name="w")
+    z = pt.random.normal(loc=100, name="z")
+    comps2 = pt.stack([w, z])
     comps2.name = "comps2"
-    idxs2 = at.random.bernoulli(0.5, name="idxs2")
+    idxs2 = pt.random.bernoulli(0.5, name="idxs2")
     mix2 = comps2[idxs2]
     mix2.name = "mix2"
 
-    comps12 = at.stack([mix1, mix2])
+    comps12 = pt.stack([mix1, mix2])
     comps12.name = "comps12"
-    idxs12 = at.random.bernoulli(0.5, name="idxs12")
+    idxs12 = pt.random.bernoulli(0.5, name="idxs12")
     mix12 = comps12[idxs12]
     mix12.name = "mix12"
 
@@ -98,8 +100,12 @@ def test_nested_scalar_mixtures():
     idxs12_vv = idxs12.clone()
     mix12_vv = mix12.clone()
 
-    logp = joint_logprob({idxs1: idxs1_vv, idxs2: idxs2_vv, idxs12: idxs12_vv, mix12: mix12_vv})
-    logp_fn = pytensor.function([idxs1_vv, idxs2_vv, idxs12_vv, mix12_vv], logp)
+    logp = factorized_joint_logprob(
+        {idxs1: idxs1_vv, idxs2: idxs2_vv, idxs12: idxs12_vv, mix12: mix12_vv}
+    )
+    logp_combined = pt.sum([pt.sum(factor) for factor in logp.values()])
+
+    logp_fn = pytensor.function([idxs1_vv, idxs2_vv, idxs12_vv, mix12_vv], logp_combined)
 
     expected_mu_logpdf = st.norm.logpdf(0) + np.log(0.5) * 3
     assert np.isclose(logp_fn(0, 0, 0, -50), expected_mu_logpdf)
@@ -117,9 +123,9 @@ def test_nested_scalar_mixtures():
 
 def test_unvalued_ir_reversion():
     """Make sure that un-valued IR rewrites are reverted."""
-    x_rv = at.random.normal()
-    y_rv = at.clip(x_rv, 0, 1)
-    z_rv = at.random.normal(y_rv, 1, name="z")
+    x_rv = pt.random.normal()
+    y_rv = pt.clip(x_rv, 0, 1)
+    z_rv = pt.random.normal(y_rv, 1, name="z")
     z_vv = z_rv.clone()
 
     # Only the `z_rv` is "valued", so `y_rv` doesn't need to be converted into
@@ -139,26 +145,26 @@ def test_unvalued_ir_reversion():
 
 
 def test_shifted_cumsum():
-    x = at.random.normal(size=(5,), name="x")
-    y = 5 + at.cumsum(x)
+    x = pt.random.normal(size=(5,), name="x")
+    y = 5 + pt.cumsum(x)
     y.name = "y"
 
     y_vv = y.clone()
-    logp = joint_logprob({y: y_vv})
+    logprob = logp(y, y_vv)
     assert np.isclose(
-        logp.eval({y_vv: np.arange(5) + 1 + 5}),
+        logprob.eval({y_vv: np.arange(5) + 1 + 5}).sum(),
         st.norm.logpdf(1) * 5,
     )
 
 
 def test_double_log_transform_rv():
-    base_rv = at.random.normal(0, 1)
-    y_rv = at.log(at.log(base_rv))
+    base_rv = pt.random.normal(0, 1)
+    y_rv = pt.log(pt.log(base_rv))
     y_rv.name = "y"
 
     y_vv = y_rv.clone()
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    logp_fn = pytensor.function([y_vv], logp)
+    logprob = logp(y_rv, y_vv)
+    logp_fn = pytensor.function([y_vv], logprob)
 
     log_log_y_val = np.asarray(0.5)
     log_y_val = np.exp(log_log_y_val)
@@ -170,17 +176,17 @@ def test_double_log_transform_rv():
 
 
 def test_affine_transform_rv():
-    loc = at.scalar("loc")
-    scale = at.vector("scale")
+    loc = pt.scalar("loc")
+    scale = pt.vector("scale")
     rv_size = 3
 
-    y_rv = loc + at.random.normal(0, 1, size=rv_size, name="base_rv") * scale
+    y_rv = loc + pt.random.normal(0, 1, size=rv_size, name="base_rv") * scale
     y_rv.name = "y"
     y_vv = y_rv.clone()
 
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    assert_no_rvs(logp)
-    logp_fn = pytensor.function([loc, scale, y_vv], logp)
+    logprob = logp(y_rv, y_vv)
+    assert_no_rvs(logprob)
+    logp_fn = pytensor.function([loc, scale, y_vv], logprob)
 
     loc_test_val = 4.0
     scale_test_val = np.full(rv_size, 0.5)
@@ -193,15 +199,15 @@ def test_affine_transform_rv():
 
 
 def test_affine_log_transform_rv():
-    a, b = at.scalars("a", "b")
-    base_rv = at.random.lognormal(0, 1, name="base_rv", size=(1, 2))
-    y_rv = a + at.log(base_rv) * b
+    a, b = pt.scalars("a", "b")
+    base_rv = pt.random.lognormal(0, 1, name="base_rv", size=(1, 2))
+    y_rv = a + pt.log(base_rv) * b
     y_rv.name = "y"
 
     y_vv = y_rv.clone()
 
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    logp_fn = pytensor.function([a, b, y_vv], logp)
+    logprob = logp(y_rv, y_vv)
+    logp_fn = pytensor.function([a, b, y_vv], logprob)
 
     a_val = -1.5
     b_val = 3.0

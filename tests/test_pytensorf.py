@@ -11,6 +11,8 @@
 #   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
+import warnings
+
 from unittest import mock
 
 import numpy as np
@@ -18,7 +20,7 @@ import numpy.ma as ma
 import numpy.testing as npt
 import pandas as pd
 import pytensor
-import pytensor.tensor as at
+import pytensor.tensor as pt
 import pytest
 import scipy.sparse as sps
 
@@ -38,6 +40,7 @@ from pymc.distributions.transforms import Interval
 from pymc.exceptions import NotConstantValueError
 from pymc.logprob.utils import ParameterValueError
 from pymc.pytensorf import (
+    collect_default_updates,
     compile_pymc,
     constant_fold,
     convert_observed_data,
@@ -48,8 +51,8 @@ from pymc.pytensorf import (
     rvs_to_value_vars,
     walk_model,
 )
+from pymc.testing import assert_no_rvs
 from pymc.vartypes import int_types
-from tests.helpers import assert_no_rvs
 
 
 @pytest.mark.parametrize(
@@ -62,7 +65,7 @@ from tests.helpers import assert_no_rvs
 )
 def test_pd_dataframe_as_tensor_variable(np_array: np.ndarray) -> None:
     df = pd.DataFrame(np_array)
-    np.testing.assert_array_equal(x=at.as_tensor_variable(x=df).eval(), y=np_array)
+    np.testing.assert_array_equal(x=pt.as_tensor_variable(x=df).eval(), y=np_array)
 
 
 @pytest.mark.parametrize(
@@ -71,7 +74,7 @@ def test_pd_dataframe_as_tensor_variable(np_array: np.ndarray) -> None:
 )
 def test_pd_series_as_tensor_variable(np_array: np.ndarray) -> None:
     df = pd.Series(np_array)
-    np.testing.assert_array_equal(x=at.as_tensor_variable(x=df).eval(), y=np_array)
+    np.testing.assert_array_equal(x=pt.as_tensor_variable(x=df).eval(), y=np_array)
 
 
 def test_pd_as_tensor_variable_multiindex() -> None:
@@ -82,7 +85,7 @@ def test_pd_as_tensor_variable_multiindex() -> None:
     df = pd.DataFrame({"A": [12.0, 80.0, 30.0, 20.0], "B": [120.0, 700.0, 30.0, 20.0]}, index=index)
     np_array = np.array([[12.0, 80.0, 30.0, 20.0], [120.0, 700.0, 30.0, 20.0]]).T
     assert isinstance(df.index, pd.MultiIndex)
-    np.testing.assert_array_equal(x=at.as_tensor_variable(x=df).eval(), y=np_array)
+    np.testing.assert_array_equal(x=pt.as_tensor_variable(x=df).eval(), y=np_array)
 
 
 class TestBroadcasting:
@@ -135,10 +138,10 @@ def _make_along_axis_idx(arr_shape, indices, axis):
 
 def test_extract_obs_data():
     with pytest.raises(TypeError):
-        extract_obs_data(at.matrix())
+        extract_obs_data(pt.matrix())
 
     data = np.random.normal(size=(2, 3))
-    data_at = at.as_tensor(data)
+    data_at = pt.as_tensor(data)
     mask = np.random.binomial(1, 0.5, size=(2, 3)).astype(bool)
 
     for val_at in (data_at, pytensor.shared(data)):
@@ -150,8 +153,8 @@ def test_extract_obs_data():
     # AdvancedIncSubtensor check
     data_m = np.ma.MaskedArray(data, mask)
     missing_values = data_at.type()[mask]
-    constant = at.as_tensor(data_m.filled())
-    z_at = at.set_subtensor(constant[mask.nonzero()], missing_values)
+    constant = pt.as_tensor(data_m.filled())
+    z_at = pt.set_subtensor(constant[mask.nonzero()], missing_values)
 
     assert isinstance(z_at.owner.op, (AdvancedIncSubtensor, AdvancedIncSubtensor1))
 
@@ -162,13 +165,13 @@ def test_extract_obs_data():
 
     # AdvancedIncSubtensor1 check
     data = np.random.normal(size=(3,))
-    data_at = at.as_tensor(data)
+    data_at = pt.as_tensor(data)
     mask = np.random.binomial(1, 0.5, size=(3,)).astype(bool)
 
     data_m = np.ma.MaskedArray(data, mask)
     missing_values = data_at.type()[mask]
-    constant = at.as_tensor(data_m.filled())
-    z_at = at.set_subtensor(constant[mask.nonzero()], missing_values)
+    constant = pt.as_tensor(data_m.filled())
+    z_at = pt.set_subtensor(constant[mask.nonzero()], missing_values)
 
     assert isinstance(z_at.owner.op, (AdvancedIncSubtensor, AdvancedIncSubtensor1))
 
@@ -179,7 +182,7 @@ def test_extract_obs_data():
 
     # Cast check
     data = np.array(5)
-    t = at.cast(at.as_tensor(5.0), np.int64)
+    t = pt.cast(pt.as_tensor(5.0), np.int64)
     res = extract_obs_data(t)
 
     assert isinstance(res, np.ndarray)
@@ -197,7 +200,7 @@ def test_convert_observed_data(input_dtype):
     dense_input = np.arange(9).reshape((3, 3)).astype(input_dtype)
 
     input_name = "input_variable"
-    pytensor_graph_input = at.as_tensor(dense_input, name=input_name)
+    pytensor_graph_input = pt.as_tensor(dense_input, name=input_name)
     pandas_input = pd.DataFrame(dense_input)
 
     # All the even numbers are replaced with NaN
@@ -274,14 +277,14 @@ def test_pandas_to_array_pandas_index():
 
 
 def test_walk_model():
-    a = at.vector("a")
+    a = pt.vector("a")
     b = uniform(0.0, a, name="b")
-    c = at.log(b)
+    c = pt.log(b)
     c.name = "c"
-    d = at.vector("d")
+    d = pt.vector("d")
     e = normal(c, d, name="e")
 
-    test_graph = at.exp(e + 1)
+    test_graph = pt.exp(e + 1)
 
     res = list(walk_model((test_graph,)))
     assert a in res
@@ -308,7 +311,7 @@ def test_walk_model():
 class TestCompilePyMC:
     def test_check_bounds_flag(self):
         """Test that CheckParameterValue Ops are replaced or removed when using compile_pymc"""
-        logp = at.ones(3)
+        logp = pt.ones(3)
         cond = np.array([1, 0, 1])
         bound = check_parameters(logp, cond)
 
@@ -325,6 +328,21 @@ class TestCompilePyMC:
         m.check_bounds = True
         with m:
             assert np.all(compile_pymc([], bound)() == -np.inf)
+
+    def test_check_parameters_can_be_replaced_by_ninf(self):
+        expr = pt.vector("expr", shape=(3,))
+        cond = pt.ge(expr, 0)
+
+        final_expr = check_parameters(expr, cond, can_be_replaced_by_ninf=True)
+        fn = compile_pymc([expr], final_expr)
+        np.testing.assert_array_equal(fn(expr=[1, 2, 3]), [1, 2, 3])
+        np.testing.assert_array_equal(fn(expr=[-1, 2, 3]), [-np.inf, -np.inf, -np.inf])
+
+        final_expr = check_parameters(expr, cond, msg="test", can_be_replaced_by_ninf=False)
+        fn = compile_pymc([expr], final_expr)
+        np.testing.assert_array_equal(fn(expr=[1, 2, 3]), [1, 2, 3])
+        with pytest.raises(ParameterValueError, match="test"):
+            fn([-1, 2, 3])
 
     def test_compile_pymc_sets_rng_updates(self):
         rng = pytensor.shared(np.random.default_rng(0))
@@ -370,9 +388,9 @@ class TestCompilePyMC:
         """Test that compile_pymc does not include rngs updates of variables that are inputs
         or ancestors to inputs
         """
-        x = at.random.normal()
-        y = at.random.normal(x)
-        z = at.random.normal(y)
+        x = pt.random.normal()
+        y = pt.random.normal(x)
+        z = pt.random.normal(y)
 
         for inputs, rvs_in_graph in (
             ([], 3),
@@ -391,34 +409,69 @@ class TestCompilePyMC:
             # Each RV adds a shared output for its rng
             assert len(fn_fgraph.outputs) == 1 + rvs_in_graph
 
-    # Disable `reseed_rngs` so that we can test with simpler update rule
-    @mock.patch("pymc.pytensorf.reseed_rngs")
-    def test_compile_pymc_custom_update_op(self, _):
-        """Test that custom MeasurableVariable Op updates are used by compile_pymc"""
+    def test_compile_pymc_symbolic_rv_update(self):
+        """Test that SymbolicRandomVariable Op update methods are used by compile_pymc"""
 
         class NonSymbolicRV(OpFromGraph):
             def update(self, node):
-                return {node.inputs[0]: node.inputs[0] + 1}
+                return {node.inputs[0]: node.outputs[0]}
 
-        dummy_inputs = [at.scalar(), at.scalar()]
-        dummy_outputs = [at.add(*dummy_inputs)]
-        dummy_x = NonSymbolicRV(dummy_inputs, dummy_outputs)(pytensor.shared(1.0), 1.0)
+        rng = pytensor.shared(np.random.default_rng())
+        dummy_rng = rng.type()
+        dummy_next_rng, dummy_x = NonSymbolicRV(
+            [dummy_rng], pt.random.normal(rng=dummy_rng).owner.outputs
+        )(rng)
 
         # Check that there are no updates at first
         fn = compile_pymc(inputs=[], outputs=dummy_x)
-        assert fn() == fn() == 2.0
+        assert fn() == fn()
 
         # And they are enabled once the Op is registered as a SymbolicRV
         SymbolicRandomVariable.register(NonSymbolicRV)
-        fn = compile_pymc(inputs=[], outputs=dummy_x)
-        assert fn() == 2.0
-        assert fn() == 3.0
+        fn = compile_pymc(inputs=[], outputs=dummy_x, random_seed=431)
+        assert fn() != fn()
+
+    def test_compile_pymc_symbolic_rv_missing_update(self):
+        """Test that error is raised if SymbolicRandomVariable Op does not
+        provide rule for updating RNG"""
+
+        class SymbolicRV(OpFromGraph):
+            def update(self, node):
+                # Update is provided for rng1 but not rng2
+                return {node.inputs[0]: node.outputs[0]}
+
+        SymbolicRandomVariable.register(SymbolicRV)
+
+        # No problems at first, as the one RNG is given the update rule
+        rng1 = pytensor.shared(np.random.default_rng())
+        dummy_rng1 = rng1.type()
+        dummy_next_rng1, dummy_x1 = SymbolicRV(
+            [dummy_rng1],
+            pt.random.normal(rng=dummy_rng1).owner.outputs,
+        )(rng1)
+        fn = compile_pymc(inputs=[], outputs=dummy_x1, random_seed=433)
+        assert fn() != fn()
+
+        # Now there's a problem as there is no update rule for rng2
+        rng2 = pytensor.shared(np.random.default_rng())
+        dummy_rng2 = rng2.type()
+        dummy_next_rng1, dummy_x1, dummy_next_rng2, dummy_x2 = SymbolicRV(
+            [dummy_rng1, dummy_rng2],
+            [
+                *pt.random.normal(rng=dummy_rng1).owner.outputs,
+                *pt.random.normal(rng=dummy_rng2).owner.outputs,
+            ],
+        )(rng1, rng2)
+        with pytest.raises(
+            ValueError, match="No update mapping found for RNG used in SymbolicRandomVariable"
+        ):
+            compile_pymc(inputs=[], outputs=[dummy_x1, dummy_x2])
 
     def test_random_seed(self):
         seedx = pytensor.shared(np.random.default_rng(1))
         seedy = pytensor.shared(np.random.default_rng(1))
-        x = at.random.normal(rng=seedx)
-        y = at.random.normal(rng=seedy)
+        x = pt.random.normal(rng=seedx)
+        y = pt.random.normal(rng=seedy)
 
         # Shared variables are the same, so outputs will be identical
         f0 = pytensor.function([], [x, y])
@@ -442,20 +495,67 @@ class TestCompilePyMC:
         assert y3_eval == y2_eval
 
     def test_multiple_updates_same_variable(self):
-        rng = pytensor.shared(np.random.default_rng(), name="rng")
-        x = at.random.normal(rng=rng)
-        y = at.random.normal(rng=rng)
+        # Raise if unexpected warning is issued
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
 
-        assert compile_pymc([], [x])
-        assert compile_pymc([], [y])
-        msg = "Multiple update expressions found for the variable rng"
-        with pytest.raises(ValueError, match=msg):
-            compile_pymc([], [x, y])
+            rng = pytensor.shared(np.random.default_rng(), name="rng")
+            x = pt.random.normal(rng=rng)
+            y = pt.random.normal(rng=rng)
+
+            # No warnings if only one variable is used
+            assert compile_pymc([], [x])
+            assert compile_pymc([], [y])
+
+            user_warn_msg = "RNG Variable rng has multiple clients"
+            with pytest.warns(UserWarning, match=user_warn_msg):
+                f = compile_pymc([], [x, y], random_seed=456)
+            assert f() == f()
+
+            # The user can provide an explicit update, but we will still issue a warning
+            with pytest.warns(UserWarning, match=user_warn_msg):
+                f = compile_pymc([], [x, y], updates={rng: y.owner.outputs[0]}, random_seed=456)
+            assert f() != f()
+
+            # Same with default update
+            rng.default_update = x.owner.outputs[0]
+            with pytest.warns(UserWarning, match=user_warn_msg):
+                f = compile_pymc([], [x, y], updates={rng: y.owner.outputs[0]}, random_seed=456)
+            assert f() != f()
+
+    def test_nested_updates(self):
+        rng = pytensor.shared(np.random.default_rng())
+        next_rng1, x = pt.random.normal(rng=rng).owner.outputs
+        next_rng2, y = pt.random.normal(rng=next_rng1).owner.outputs
+        next_rng3, z = pt.random.normal(rng=next_rng2).owner.outputs
+
+        collect_default_updates([], [x, y, z]) == {rng: next_rng3}
+
+        fn = compile_pymc([], [x, y, z], random_seed=514)
+        assert not set(list(np.array(fn()))) & set(list(np.array(fn())))
+
+        # A local myopic rule (as PyMC used before, would not work properly)
+        fn = pytensor.function([], [x, y, z], updates={rng: next_rng1})
+        assert set(list(np.array(fn()))) & set(list(np.array(fn())))
+
+
+def test_collect_default_updates_must_be_shared():
+    shared_rng = pytensor.shared(np.random.default_rng())
+    nonshared_rng = shared_rng.type()
+
+    next_rng_of_shared, x = pt.random.normal(rng=shared_rng).owner.outputs
+    next_rng_of_nonshared, y = pt.random.normal(rng=nonshared_rng).owner.outputs
+
+    res = collect_default_updates(inputs=[nonshared_rng], outputs=[x, y])
+    assert res == {shared_rng: next_rng_of_shared}
+
+    res = collect_default_updates(inputs=[nonshared_rng], outputs=[x, y], must_be_shared=False)
+    assert res == {shared_rng: next_rng_of_shared, nonshared_rng: next_rng_of_nonshared}
 
 
 def test_replace_rng_nodes():
     rng = pytensor.shared(np.random.default_rng())
-    x = at.random.normal(rng=rng)
+    x = pt.random.normal(rng=rng)
     x_rng, *x_non_rng_inputs = x.owner.inputs
 
     cloned_x = x.owner.clone().default_output()
@@ -511,8 +611,8 @@ def test_reseed_rngs():
 
 
 def test_constant_fold():
-    x = at.random.normal(size=(5,))
-    y = at.arange(x.size)
+    x = pt.random.normal(size=(5,))
+    y = pt.arange(x.size)
 
     res = constant_fold((y, y.shape))
     assert np.array_equal(res[0], np.arange(5))
@@ -521,8 +621,8 @@ def test_constant_fold():
 
 def test_constant_fold_raises():
     size = pytensor.shared(5)
-    x = at.random.normal(size=(size,))
-    y = at.arange(x.size)
+    x = pt.random.normal(size=(size,))
+    y = pt.arange(x.size)
 
     with pytest.raises(NotConstantValueError):
         constant_fold((y, y.shape))
@@ -551,7 +651,7 @@ class TestReplaceRVsByValues:
             else:
                 b = pm.Uniform("b", 0, a + 1.0, transform=interval)
             c = pm.Normal("c")
-            d = at.log(c + b) + 2.0
+            d = pt.log(c + b) + 2.0
 
         a_value_var = m.rvs_to_values[a]
         assert m.rvs_to_transforms[a] is not None
@@ -569,11 +669,11 @@ class TestReplaceRVsByValues:
                 rvs_to_transforms=m.rvs_to_transforms,
             )
 
-        assert res.owner.op == at.add
+        assert res.owner.op == pt.add
         log_output = res.owner.inputs[0]
-        assert log_output.owner.op == at.log
+        assert log_output.owner.op == pt.log
         log_add_output = res.owner.inputs[0].owner.inputs[0]
-        assert log_add_output.owner.op == at.add
+        assert log_add_output.owner.op == pt.add
         c_output = log_add_output.owner.inputs[0]
 
         # We make sure that the random variables were replaced
@@ -624,12 +724,12 @@ class TestReplaceRVsByValues:
                 rvs_to_transforms=m.rvs_to_transforms,
             )
 
-        assert res.owner.op == at.add
+        assert res.owner.op == pt.add
         assert res.owner.inputs[0] is z_value
         res_y = res.owner.inputs[1]
         # Graph should have be cloned, and therefore y and res_y should have different ids
         assert res_y is not y
-        assert res_y.owner.op == at.random.normal
+        assert res_y.owner.op == pt.random.normal
         assert res_y.owner.inputs[3] is x_value
 
     @pytest.mark.parametrize("test_deprecated_fn", (True, False))
@@ -638,7 +738,7 @@ class TestReplaceRVsByValues:
         # does not change the original rvs in place. See issue #5172
         with pm.Model() as m:
             one = pm.LogNormal("one", mu=0)
-            two = pm.LogNormal("two", mu=at.log(one))
+            two = pm.LogNormal("two", mu=pt.log(one))
 
             # We add potentials or deterministics that are not in topological order
             pm.Potential("two_pot", two)

@@ -36,7 +36,7 @@
 
 import numpy as np
 import pytensor
-import pytensor.tensor as at
+import pytensor.tensor as pt
 import pytest
 import scipy as sp
 import scipy.special
@@ -49,7 +49,7 @@ from pytensor.scan import scan
 
 from pymc.distributions.transforms import _default_transform, log, logodds
 from pymc.logprob.abstract import MeasurableVariable, _get_measurable_outputs, _logprob
-from pymc.logprob.joint_logprob import factorized_joint_logprob
+from pymc.logprob.basic import factorized_joint_logprob, logp
 from pymc.logprob.transforms import (
     ChainedTransform,
     ExpTransform,
@@ -63,8 +63,7 @@ from pymc.logprob.transforms import (
     TransformValuesRewrite,
     transformed_variable,
 )
-from tests.helpers import assert_no_rvs
-from tests.logprob.utils import joint_logprob
+from pymc.testing import assert_no_rvs
 
 
 class DirichletScipyDist:
@@ -94,15 +93,15 @@ class DirichletScipyDist:
 @pytest.mark.parametrize(
     "at_dist, dist_params, sp_dist, size",
     [
-        (at.random.uniform, (0, 1), sp.stats.uniform, ()),
+        (pt.random.uniform, (0, 1), sp.stats.uniform, ()),
         (
-            at.random.pareto,
+            pt.random.pareto,
             (1.5, 10.5),
             lambda b, scale: sp.stats.pareto(b, scale=scale),
             (),
         ),
         (
-            at.random.triangular,
+            pt.random.triangular,
             (1.5, 3.0, 10.5),
             lambda lower, mode, upper: sp.stats.triang(
                 (mode - lower) / (upper - lower), loc=lower, scale=upper - lower
@@ -110,13 +109,13 @@ class DirichletScipyDist:
             (),
         ),
         (
-            at.random.halfnormal,
+            pt.random.halfnormal,
             (0, 1),
             sp.stats.halfnorm,
             (),
         ),
         pytest.param(
-            at.random.wald,
+            pt.random.wald,
             (1.5, 10.5),
             lambda mean, scale: sp.stats.invgauss(mean / scale, scale=scale),
             (),
@@ -126,49 +125,49 @@ class DirichletScipyDist:
             ),
         ),
         (
-            at.random.exponential,
+            pt.random.exponential,
             (1.5,),
             lambda mu: sp.stats.expon(scale=mu),
             (),
         ),
         pytest.param(
-            at.random.lognormal,
+            pt.random.lognormal,
             (-1.5, 10.5),
             lambda mu, sigma: sp.stats.lognorm(s=sigma, loc=0, scale=np.exp(mu)),
             (),
         ),
         (
-            at.random.lognormal,
+            pt.random.lognormal,
             (-1.5, 1.5),
             lambda mu, sigma: sp.stats.lognorm(s=sigma, scale=np.exp(mu)),
             (),
         ),
         (
-            at.random.halfcauchy,
+            pt.random.halfcauchy,
             (1.5, 10.5),
             lambda alpha, beta: sp.stats.halfcauchy(loc=alpha, scale=beta),
             (),
         ),
         (
-            at.random.gamma,
+            pt.random.gamma,
             (1.5, 10.5),
             lambda alpha, inv_beta: sp.stats.gamma(alpha, scale=1.0 / inv_beta),
             (),
         ),
         (
-            at.random.invgamma,
+            pt.random.invgamma,
             (1.5, 10.5),
             lambda alpha, beta: sp.stats.invgamma(alpha, scale=beta),
             (),
         ),
         (
-            at.random.chisquare,
+            pt.random.chisquare,
             (1.5,),
             lambda df: sp.stats.chi2(df),
             (),
         ),
         pytest.param(
-            at.random.weibull,
+            pt.random.weibull,
             (1.5,),
             lambda c: sp.stats.weibull_min(c),
             (),
@@ -178,31 +177,31 @@ class DirichletScipyDist:
             ),
         ),
         (
-            at.random.beta,
+            pt.random.beta,
             (1.5, 1.5),
             lambda alpha, beta: sp.stats.beta(alpha, beta),
             (),
         ),
         (
-            at.random.vonmises,
+            pt.random.vonmises,
             (1.5, 10.5),
             lambda mu, kappa: sp.stats.vonmises(kappa, loc=mu),
             (),
         ),
         (
-            at.random.dirichlet,
+            pt.random.dirichlet,
             (np.array([0.7, 0.3]),),
             lambda alpha: sp.stats.dirichlet(alpha),
             (),
         ),
         (
-            at.random.dirichlet,
+            pt.random.dirichlet,
             (np.array([[0.7, 0.3], [0.9, 0.1]]),),
             lambda alpha: DirichletScipyDist(alpha),
             (),
         ),
         pytest.param(
-            at.random.dirichlet,
+            pt.random.dirichlet,
             (np.array([0.3, 0.7]),),
             lambda alpha: DirichletScipyDist(alpha),
             (3, 2),
@@ -213,7 +212,7 @@ def test_transformed_logprob(at_dist, dist_params, sp_dist, size):
     """
     This test takes a `RandomVariable` type, plus parameters, and uses it to
     construct a variable ``a`` that's used in the graph ``b =
-    at.random.normal(a, 1.0)``.  The transformed log-probability is then
+    pt.random.normal(a, 1.0)``.  The transformed log-probability is then
     computed for ``b``.  We then test that the log-probability of ``a`` is
     properly transformed, as well as any instances of ``a`` that are used
     elsewhere in the graph (i.e. in ``b``), by comparing the graph for the
@@ -225,21 +224,24 @@ def test_transformed_logprob(at_dist, dist_params, sp_dist, size):
 
     a = at_dist(*dist_params, size=size)
     a.name = "a"
-    a_value_var = at.tensor(dtype=a.dtype, shape=(None,) * a.ndim)
+    a_value_var = pt.tensor(dtype=a.dtype, shape=(None,) * a.ndim)
     a_value_var.name = "a_value"
 
-    b = at.random.normal(a, 1.0)
+    b = pt.random.normal(a, 1.0)
     b.name = "b"
     b_value_var = b.clone()
     b_value_var.name = "b_value"
 
     transform = _default_transform(a.owner.op, a)
     transform_rewrite = TransformValuesRewrite({a_value_var: transform})
-    res = joint_logprob({a: a_value_var, b: b_value_var}, extra_rewrites=transform_rewrite)
+    res = factorized_joint_logprob(
+        {a: a_value_var, b: b_value_var}, extra_rewrites=transform_rewrite
+    )
+    res_combined = pt.sum([pt.sum(factor) for factor in res.values()])
 
     test_val_rng = np.random.RandomState(3238)
 
-    logp_vals_fn = pytensor.function([a_value_var, b_value_var], res)
+    logp_vals_fn = pytensor.function([a_value_var, b_value_var], res_combined)
 
     a_forward_fn = pytensor.function([a_value_var], transform.forward(a_value_var, *a.owner.inputs))
     a_backward_fn = pytensor.function(
@@ -303,17 +305,18 @@ def test_transformed_logprob(at_dist, dist_params, sp_dist, size):
 
 @pytest.mark.parametrize("use_jacobian", [True, False])
 def test_simple_transformed_logprob_nojac(use_jacobian):
-    X_rv = at.random.halfnormal(0, 3, name="X")
+    X_rv = pt.random.halfnormal(0, 3, name="X")
     x_vv = X_rv.clone()
     x_vv.name = "x"
 
     transform_rewrite = TransformValuesRewrite({x_vv: log})
-    tr_logp = joint_logprob(
+    tr_logp = factorized_joint_logprob(
         {X_rv: x_vv}, extra_rewrites=transform_rewrite, use_jacobian=use_jacobian
     )
+    tr_logp_combined = pt.sum([pt.sum(factor) for factor in tr_logp.values()])
 
     assert np.isclose(
-        tr_logp.eval({x_vv: np.log(2.5)}),
+        tr_logp_combined.eval({x_vv: np.log(2.5)}),
         sp.stats.halfnorm(0, 3).logpdf(2.5) + (np.log(2.5) if use_jacobian else 0.0),
     )
 
@@ -329,14 +332,14 @@ def test_fallback_log_jac_det(ndim):
         name = "square"
 
         def forward(self, value, *inputs):
-            return at.power(value, 2)
+            return pt.power(value, 2)
 
         def backward(self, value, *inputs):
-            return at.sqrt(value)
+            return pt.sqrt(value)
 
     square_tr = SquareTransform()
 
-    value = at.TensorType("float64", (None,) * ndim)("value")
+    value = pt.TensorType("float64", (None,) * ndim)("value")
     value_tr = square_tr.forward(value)
     log_jac_det = square_tr.log_jac_det(value_tr)
 
@@ -351,9 +354,9 @@ def test_hierarchical_uniform_transform():
     the value var `x`
     """
 
-    lower_rv = at.random.uniform(0, 1, name="lower")
-    upper_rv = at.random.uniform(9, 10, name="upper")
-    x_rv = at.random.uniform(lower_rv, upper_rv, name="x")
+    lower_rv = pt.random.uniform(0, 1, name="lower")
+    upper_rv = pt.random.uniform(9, 10, name="upper")
+    x_rv = pt.random.uniform(lower_rv, upper_rv, name="x")
 
     lower = lower_rv.clone()
     upper = upper_rv.clone()
@@ -366,19 +369,20 @@ def test_hierarchical_uniform_transform():
             x: _default_transform(x_rv.owner.op, x_rv),
         }
     )
-    logp = joint_logprob(
+    logp = factorized_joint_logprob(
         {lower_rv: lower, upper_rv: upper, x_rv: x},
         extra_rewrites=transform_rewrite,
     )
+    logp_combined = pt.sum([pt.sum(factor) for factor in logp.values()])
 
-    assert_no_rvs(logp)
-    assert not np.isinf(logp.eval({lower: -10, upper: 20, x: -20}))
+    assert_no_rvs(logp_combined)
+    assert not np.isinf(logp_combined.eval({lower: -10, upper: 20, x: -20}))
 
 
 def test_nondefault_transforms():
-    loc_rv = at.random.uniform(-10, 10, name="loc")
-    scale_rv = at.random.uniform(-1, 1, name="scale")
-    x_rv = at.random.normal(loc_rv, scale_rv, name="x")
+    loc_rv = pt.random.uniform(-10, 10, name="loc")
+    scale_rv = pt.random.uniform(-1, 1, name="scale")
+    x_rv = pt.random.normal(loc_rv, scale_rv, name="x")
 
     loc = loc_rv.clone()
     scale = scale_rv.clone()
@@ -392,10 +396,11 @@ def test_nondefault_transforms():
         }
     )
 
-    logp = joint_logprob(
+    logp = factorized_joint_logprob(
         {loc_rv: loc, scale_rv: scale, x_rv: x},
         extra_rewrites=transform_rewrite,
     )
+    logp_combined = pt.sum([pt.sum(factor) for factor in logp.values()])
 
     # Check numerical evaluation matches with expected transforms
     loc_val = 0
@@ -413,7 +418,7 @@ def test_nondefault_transforms():
     exp_logp += x_val_tr  # log log_jac_det
 
     assert np.isclose(
-        logp.eval({loc: loc_val, scale: scale_val_tr, x: x_val_tr}),
+        logp_combined.eval({loc: loc_val, scale: scale_val_tr, x: x_val_tr}),
         exp_logp,
     )
 
@@ -423,19 +428,20 @@ def test_default_transform_multiout():
 
     # This SVD value is necessarily `1`, but it's generated by an `Op` with
     # multiple outputs and no default output.
-    sd = at.linalg.svd(at.eye(1))[1][0]
-    x_rv = at.random.normal(0, sd, name="x")
+    sd = pt.linalg.svd(pt.eye(1))[1][0]
+    x_rv = pt.random.normal(0, sd, name="x")
     x = x_rv.clone()
 
     transform_rewrite = TransformValuesRewrite({x: None})
 
-    logp = joint_logprob(
+    logp = factorized_joint_logprob(
         {x_rv: x},
         extra_rewrites=transform_rewrite,
     )
+    logp_combined = pt.sum([pt.sum(factor) for factor in logp.values()])
 
     assert np.isclose(
-        logp.eval({x: 1}),
+        logp_combined.eval({x: 1}),
         sp.stats.norm(0, 1).logpdf(1),
     )
 
@@ -443,7 +449,7 @@ def test_default_transform_multiout():
 @pytest.fixture(scope="module")
 def multiout_measurable_op():
     # Create a dummy Op that just returns the two inputs
-    mu1, mu2 = at.scalars("mu1", "mu2")
+    mu1, mu2 = pt.scalars("mu1", "mu2")
 
     class TestOpFromGraph(OpFromGraph):
         def do_constant_folding(self, fgraph, node):
@@ -481,7 +487,8 @@ def test_nondefault_transform_multiout(transform_x, transform_y, multiout_measur
         }
     )
 
-    logp = joint_logprob({x: x_vv, y: y_vv}, extra_rewrites=transform_rewrite)
+    logp = factorized_joint_logprob({x: x_vv, y: y_vv}, extra_rewrites=transform_rewrite)
+    logp_combined = pt.sum([pt.sum(factor) for factor in logp.values()])
 
     x_vv_test = np.random.normal()
     y_vv_test = np.abs(np.random.normal())
@@ -497,11 +504,13 @@ def test_nondefault_transform_multiout(transform_x, transform_y, multiout_measur
     else:
         expected_logp += np.log(y_vv_test) + 2 - np.log(y_vv_test)
 
-    np.testing.assert_almost_equal(logp.eval({x_vv: x_vv_test, y_vv: y_vv_test}), expected_logp)
+    np.testing.assert_almost_equal(
+        logp_combined.eval({x_vv: x_vv_test, y_vv: y_vv_test}), expected_logp
+    )
 
 
 def test_TransformValuesMapping():
-    x = at.vector()
+    x = pt.vector()
     fg = FunctionGraph(outputs=[x])
 
     tvm = TransformValuesMapping({})
@@ -518,7 +527,7 @@ def test_original_values_output_dict():
     Test that the original unconstrained value variable appears an the key of
     the logprob factor
     """
-    p_rv = at.random.beta(1, 1, name="p")
+    p_rv = pt.random.beta(1, 1, name="p")
     p_vv = p_rv.clone()
 
     tr = TransformValuesRewrite({p_vv: logodds})
@@ -533,13 +542,13 @@ def test_mixture_transform():
     This test is specific to `MixtureRV`, which is derived from an `OpFromGraph`.
     """
 
-    I_rv = at.random.bernoulli(0.5, name="I")
-    Y_1_rv = at.random.beta(100, 1, name="Y_1")
-    Y_2_rv = at.random.beta(1, 100, name="Y_2")
+    I_rv = pt.random.bernoulli(0.5, name="I")
+    Y_1_rv = pt.random.beta(100, 1, name="Y_1")
+    Y_2_rv = pt.random.beta(1, 100, name="Y_2")
 
     # A `MixtureRV`, which is an `OpFromGraph` subclass, will replace this
-    # `at.stack` in the graph
-    Y_rv = at.stack([Y_1_rv, Y_2_rv])[I_rv]
+    # `pt.stack` in the graph
+    Y_rv = pt.stack([Y_1_rv, Y_2_rv])[I_rv]
     Y_rv.name = "Y"
 
     i_vv = I_rv.clone()
@@ -547,35 +556,37 @@ def test_mixture_transform():
     y_vv = Y_rv.clone()
     y_vv.name = "y"
 
-    logp_no_trans = joint_logprob(
+    logp_no_trans = factorized_joint_logprob(
         {Y_rv: y_vv, I_rv: i_vv},
     )
+    logp_no_trans_comb = pt.sum([pt.sum(factor) for factor in logp_no_trans.values()])
 
     transform_rewrite = TransformValuesRewrite({y_vv: LogTransform()})
 
     with pytest.warns(None) as record:
         # This shouldn't raise any warnings
-        logp_trans = joint_logprob(
+        logp_trans = factorized_joint_logprob(
             {Y_rv: y_vv, I_rv: i_vv},
             extra_rewrites=transform_rewrite,
             use_jacobian=False,
         )
+        logp_trans_combined = pt.sum([pt.sum(factor) for factor in logp_trans.values()])
 
     assert not record.list
 
     # The untransformed graph should be the same as the transformed graph after
     # replacing the `Y_rv` value variable with a transformed version of itself
-    logp_nt_fg = FunctionGraph(outputs=[logp_no_trans], clone=False)
-    y_trans = transformed_variable(at.exp(y_vv), y_vv)
+    logp_nt_fg = FunctionGraph(outputs=[logp_no_trans_comb], clone=False)
+    y_trans = transformed_variable(pt.exp(y_vv), y_vv)
     y_trans.name = "y_log"
     logp_nt_fg.replace(y_vv, y_trans)
     logp_nt = logp_nt_fg.outputs[0]
 
-    assert equal_computations([logp_nt], [logp_trans])
+    assert equal_computations([logp_nt], [logp_trans_combined])
 
 
 def test_invalid_interval_transform():
-    x_rv = at.random.normal(0, 1)
+    x_rv = pt.random.normal(0, 1)
     x_vv = x_rv.clone()
 
     msg = "Both edges of IntervalTransform cannot be None"
@@ -599,17 +610,17 @@ def test_chained_transform():
     ch = ChainedTransform(
         transform_list=[
             ScaleTransform(
-                transform_args_fn=lambda *inputs: at.constant(scale),
+                transform_args_fn=lambda *inputs: pt.constant(scale),
             ),
             ExpTransform(),
             LocTransform(
-                transform_args_fn=lambda *inputs: at.constant(loc),
+                transform_args_fn=lambda *inputs: pt.constant(loc),
             ),
         ],
-        base_op=at.random.multivariate_normal,
+        base_op=pt.random.multivariate_normal,
     )
 
-    x = at.random.multivariate_normal(np.zeros(3), np.eye(3))
+    x = pt.random.multivariate_normal(np.zeros(3), np.eye(3))
     x_val = x.eval()
 
     x_val_forward = ch.forward(x_val, *x.owner.inputs).eval()
@@ -626,19 +637,19 @@ def test_chained_transform():
 
     log_jac_det = ch.log_jac_det(x_val_forward, *x.owner.inputs, scale, loc)
     assert np.isclose(
-        log_jac_det.eval(),
-        -np.log(scale) - np.sum(np.log(x_val_forward - loc)),
+        pt.sum(log_jac_det).eval(),
+        np.sum(-np.log(scale) - np.log(x_val_forward - loc)),
     )
 
 
 def test_exp_transform_rv():
-    base_rv = at.random.normal(0, 1, size=3, name="base_rv")
-    y_rv = at.exp(base_rv)
+    base_rv = pt.random.normal(0, 1, size=3, name="base_rv")
+    y_rv = pt.exp(base_rv)
     y_rv.name = "y"
 
     y_vv = y_rv.clone()
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    logp_fn = pytensor.function([y_vv], logp)
+    logprob = logp(y_rv, y_vv)
+    logp_fn = pytensor.function([y_vv], logprob)
 
     y_val = [-2.0, 0.1, 0.3]
     np.testing.assert_allclose(
@@ -648,13 +659,13 @@ def test_exp_transform_rv():
 
 
 def test_log_transform_rv():
-    base_rv = at.random.lognormal(0, 1, size=2, name="base_rv")
-    y_rv = at.log(base_rv)
+    base_rv = pt.random.lognormal(0, 1, size=2, name="base_rv")
+    y_rv = pt.log(base_rv)
     y_rv.name = "y"
 
     y_vv = y_rv.clone()
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    logp_fn = pytensor.function([y_vv], logp)
+    logprob = logp(y_rv, y_vv)
+    logp_fn = pytensor.function([y_vv], logprob)
 
     y_val = [0.1, 0.3]
     np.testing.assert_allclose(
@@ -666,23 +677,23 @@ def test_log_transform_rv():
 @pytest.mark.parametrize(
     "rv_size, loc_type, addition",
     [
-        (None, at.scalar, True),
-        (2, at.vector, False),
-        ((2, 1), at.col, True),
+        (None, pt.scalar, True),
+        (2, pt.vector, False),
+        ((2, 1), pt.col, True),
     ],
 )
 def test_loc_transform_rv(rv_size, loc_type, addition):
     loc = loc_type("loc")
     if addition:
-        y_rv = loc + at.random.normal(0, 1, size=rv_size, name="base_rv")
+        y_rv = loc + pt.random.normal(0, 1, size=rv_size, name="base_rv")
     else:
-        y_rv = at.random.normal(0, 1, size=rv_size, name="base_rv") - at.neg(loc)
+        y_rv = pt.random.normal(0, 1, size=rv_size, name="base_rv") - pt.neg(loc)
     y_rv.name = "y"
     y_vv = y_rv.clone()
 
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    assert_no_rvs(logp)
-    logp_fn = pytensor.function([loc, y_vv], logp)
+    logprob = logp(y_rv, y_vv)
+    assert_no_rvs(logprob)
+    logp_fn = pytensor.function([loc, y_vv], logprob)
 
     loc_test_val = np.full(rv_size, 4.0)
     y_test_val = np.full(rv_size, 1.0)
@@ -696,23 +707,23 @@ def test_loc_transform_rv(rv_size, loc_type, addition):
 @pytest.mark.parametrize(
     "rv_size, scale_type, product",
     [
-        (None, at.scalar, True),
-        (1, at.TensorType("floatX", (True,)), True),
-        ((2, 3), at.matrix, False),
+        (None, pt.scalar, True),
+        (1, pt.TensorType("floatX", (True,)), True),
+        ((2, 3), pt.matrix, False),
     ],
 )
 def test_scale_transform_rv(rv_size, scale_type, product):
     scale = scale_type("scale")
     if product:
-        y_rv = at.random.normal(0, 1, size=rv_size, name="base_rv") * scale
+        y_rv = pt.random.normal(0, 1, size=rv_size, name="base_rv") * scale
     else:
-        y_rv = at.random.normal(0, 1, size=rv_size, name="base_rv") / at.reciprocal(scale)
+        y_rv = pt.random.normal(0, 1, size=rv_size, name="base_rv") / pt.reciprocal(scale)
     y_rv.name = "y"
     y_vv = y_rv.clone()
 
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    assert_no_rvs(logp)
-    logp_fn = pytensor.function([scale, y_vv], logp)
+    logprob = logp(y_rv, y_vv)
+    assert_no_rvs(logprob)
+    logp_fn = pytensor.function([scale, y_vv], logprob)
 
     scale_test_val = np.full(rv_size, 4.0)
     y_test_val = np.full(rv_size, 1.0)
@@ -724,15 +735,16 @@ def test_scale_transform_rv(rv_size, scale_type, product):
 
 
 def test_transformed_rv_and_value():
-    y_rv = at.random.halfnormal(-1, 1, name="base_rv") + 1
+    y_rv = pt.random.halfnormal(-1, 1, name="base_rv") + 1
     y_rv.name = "y"
     y_vv = y_rv.clone()
 
     transform_rewrite = TransformValuesRewrite({y_vv: LogTransform()})
 
-    logp = joint_logprob({y_rv: y_vv}, extra_rewrites=transform_rewrite)
-    assert_no_rvs(logp)
-    logp_fn = pytensor.function([y_vv], logp)
+    logp = factorized_joint_logprob({y_rv: y_vv}, extra_rewrites=transform_rewrite)
+    logp_combined = pt.sum([pt.sum(factor) for factor in logp.values()])
+    assert_no_rvs(logp_combined)
+    logp_fn = pytensor.function([y_vv], logp_combined)
 
     y_test_val = -5
 
@@ -743,60 +755,60 @@ def test_transformed_rv_and_value():
 
 
 def test_loc_transform_multiple_rvs_fails1():
-    x_rv1 = at.random.normal(name="x_rv1")
-    x_rv2 = at.random.normal(name="x_rv2")
+    x_rv1 = pt.random.normal(name="x_rv1")
+    x_rv2 = pt.random.normal(name="x_rv2")
     y_rv = x_rv1 + x_rv2
 
     y = y_rv.clone()
 
     with pytest.raises(RuntimeError, match="could not be derived"):
-        joint_logprob({y_rv: y})
+        factorized_joint_logprob({y_rv: y})
 
 
 def test_nested_loc_transform_multiple_rvs_fails2():
-    x_rv1 = at.random.normal(name="x_rv1")
-    x_rv2 = at.cos(at.random.normal(name="x_rv2"))
+    x_rv1 = pt.random.normal(name="x_rv1")
+    x_rv2 = pt.cos(pt.random.normal(name="x_rv2"))
     y_rv = x_rv1 + x_rv2
 
     y = y_rv.clone()
 
     with pytest.raises(RuntimeError, match="could not be derived"):
-        joint_logprob({y_rv: y})
+        factorized_joint_logprob({y_rv: y})
 
 
 def test_discrete_rv_unary_transform_fails():
-    y_rv = at.exp(at.random.poisson(1))
+    y_rv = pt.exp(pt.random.poisson(1))
     with pytest.raises(RuntimeError, match="could not be derived"):
-        joint_logprob({y_rv: y_rv.clone()})
+        factorized_joint_logprob({y_rv: y_rv.clone()})
 
 
 def test_discrete_rv_multinary_transform_fails():
-    y_rv = 5 + at.random.poisson(1)
+    y_rv = 5 + pt.random.poisson(1)
     with pytest.raises(RuntimeError, match="could not be derived"):
-        joint_logprob({y_rv: y_rv.clone()})
+        factorized_joint_logprob({y_rv: y_rv.clone()})
 
 
 @pytest.mark.xfail(reason="Check not implemented yet")
 def test_invalid_broadcasted_transform_rv_fails():
-    loc = at.vector("loc")
-    y_rv = loc + at.random.normal(0, 1, size=1, name="base_rv")
+    loc = pt.vector("loc")
+    y_rv = loc + pt.random.normal(0, 1, size=1, name="base_rv")
     y_rv.name = "y"
     y_vv = y_rv.clone()
 
     # This logp derivation should fail or count only once the values that are broadcasted
-    logp = joint_logprob({y_rv: y_vv}, sum=False)
-    assert logp.eval({y_vv: [0, 0, 0, 0], loc: [0, 0, 0, 0]}).shape == ()
+    logprob = logp(y_rv, y_vv)
+    assert logprob.eval({y_vv: [0, 0, 0, 0], loc: [0, 0, 0, 0]}).shape == ()
 
 
 @pytest.mark.parametrize("numerator", (1.0, 2.0))
 def test_reciprocal_rv_transform(numerator):
     shape = 3
     scale = 5
-    x_rv = numerator / at.random.gamma(shape, scale, size=(2,))
+    x_rv = numerator / pt.random.gamma(shape, scale, size=(2,))
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}, sum=False))
+    x_logp_fn = pytensor.function([x_vv], logp(x_rv, x_vv))
 
     x_test_val = np.r_[-0.5, 1.5]
     assert np.allclose(
@@ -807,11 +819,11 @@ def test_reciprocal_rv_transform(numerator):
 
 def test_sqr_transform():
     # The square of a unit normal is a chi-square with 1 df
-    x_rv = at.random.normal(0, 1, size=(4,)) ** 2
+    x_rv = pt.random.normal(0, 1, size=(4,)) ** 2
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}, sum=False))
+    x_logp_fn = pytensor.function([x_vv], logp(x_rv, x_vv))
 
     x_test_val = np.r_[-0.5, 0.5, 1, 2.5]
     assert np.allclose(
@@ -822,11 +834,11 @@ def test_sqr_transform():
 
 def test_sqrt_transform():
     # The sqrt of a chisquare with n df is a chi distribution with n df
-    x_rv = at.sqrt(at.random.chisquare(df=3, size=(4,)))
+    x_rv = pt.sqrt(pt.random.chisquare(df=3, size=(4,)))
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}, sum=False))
+    x_logp_fn = pytensor.function([x_vv], logp(x_rv, x_vv))
 
     x_test_val = np.r_[-2.5, 0.5, 1, 2.5]
     assert np.allclose(
@@ -838,11 +850,11 @@ def test_sqrt_transform():
 @pytest.mark.parametrize("power", (-3, -1, 1, 5, 7))
 def test_negative_value_odd_power_transform(power):
     # check that negative values and odd powers evaluate to a finite logp
-    x_rv = at.random.normal() ** power
+    x_rv = pt.random.normal() ** power
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}, sum=False))
+    x_logp_fn = pytensor.function([x_vv], logp(x_rv, x_vv))
 
     assert np.isfinite(x_logp_fn(1))
     assert np.isfinite(x_logp_fn(-1))
@@ -851,11 +863,11 @@ def test_negative_value_odd_power_transform(power):
 @pytest.mark.parametrize("power", (-2, 2, 4, 6, 8))
 def test_negative_value_even_power_transform(power):
     # check that negative values and odd powers evaluate to -inf logp
-    x_rv = at.random.normal() ** power
+    x_rv = pt.random.normal() ** power
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}, sum=False))
+    x_logp_fn = pytensor.function([x_vv], logp(x_rv, x_vv))
 
     assert np.isfinite(x_logp_fn(1))
     assert np.isneginf(x_logp_fn(-1))
@@ -864,11 +876,11 @@ def test_negative_value_even_power_transform(power):
 @pytest.mark.parametrize("power", (-1 / 3, -1 / 2, 1 / 2, 1 / 3))
 def test_negative_value_frac_power_transform(power):
     # check that negative values and fractional powers evaluate to -inf logp
-    x_rv = at.random.normal() ** power
+    x_rv = pt.random.normal() ** power
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}, sum=False))
+    x_logp_fn = pytensor.function([x_vv], logp(x_rv, x_vv))
 
     assert np.isfinite(x_logp_fn(2.5))
     assert np.isneginf(x_logp_fn(-2.5))
@@ -876,34 +888,34 @@ def test_negative_value_frac_power_transform(power):
 
 @pytest.mark.parametrize("test_val", (2.5, -2.5))
 def test_absolute_transform(test_val):
-    x_rv = at.abs(at.random.normal())
-    y_rv = at.random.halfnormal()
+    x_rv = pt.abs(pt.random.normal())
+    y_rv = pt.random.halfnormal()
 
     x_vv = x_rv.clone()
     y_vv = y_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}, sum=False))
-    y_logp_fn = pytensor.function([y_vv], joint_logprob({y_rv: y_vv}, sum=False))
+    x_logp_fn = pytensor.function([x_vv], logp(x_rv, x_vv))
+    y_logp_fn = pytensor.function([y_vv], logp(y_rv, y_vv))
 
     assert np.allclose(x_logp_fn(test_val), y_logp_fn(test_val))
 
 
 def test_negated_rv_transform():
-    x_rv = -at.random.halfnormal()
+    x_rv = -pt.random.halfnormal()
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}))
+    x_logp_fn = pytensor.function([x_vv], pt.sum(logp(x_rv, x_vv)))
 
     assert np.isclose(x_logp_fn(-1.5), sp.stats.halfnorm.logpdf(1.5))
 
 
 def test_subtracted_rv_transform():
     # Choose base RV that is asymmetric around zero
-    x_rv = 5.0 - at.random.normal(1.0)
+    x_rv = 5.0 - pt.random.normal(1.0)
     x_rv.name = "x"
 
     x_vv = x_rv.clone()
-    x_logp_fn = pytensor.function([x_vv], joint_logprob({x_rv: x_vv}))
+    x_logp_fn = pytensor.function([x_vv], pt.sum(logp(x_rv, x_vv)))
 
     assert np.isclose(x_logp_fn(7.3), sp.stats.norm.logpdf(5.0 - 7.3, 1.0))
 
@@ -911,11 +923,16 @@ def test_subtracted_rv_transform():
 def test_scan_transform():
     """Test that Scan valued variables can be transformed"""
 
-    init = at.random.beta(1, 1, name="init")
+    init = pt.random.beta(1, 1, name="init")
     init_vv = init.clone()
 
+    def scan_step(prev_innov):
+        next_innov = pt.random.beta(prev_innov * 10, (1 - prev_innov) * 10)
+        update = {next_innov.owner.inputs[0]: next_innov.owner.outputs[0]}
+        return next_innov, update
+
     innov, _ = scan(
-        fn=lambda prev_innov: at.random.beta(prev_innov * 10, (1 - prev_innov) * 10),
+        fn=scan_step,
         outputs_info=[init],
         n_steps=4,
     )
@@ -937,10 +954,10 @@ def test_scan_transform():
     innov = []
     prev_innov = init
     for i in range(4):
-        next_innov = at.random.beta(prev_innov * 10, (1 - prev_innov) * 10, name=f"innov[i]")
+        next_innov = pt.random.beta(prev_innov * 10, (1 - prev_innov) * 10, name=f"innov[i]")
         innov.append(next_innov)
         prev_innov = next_innov
-    innov = at.stack(innov)
+    innov = pt.stack(innov)
     innov.name = "innov"
 
     tr = TransformValuesRewrite(
@@ -959,3 +976,28 @@ def test_scan_transform():
         "innov": np.full((4,), -0.5),
     }
     np.testing.assert_allclose(logp_fn(**test_point), ref_logp_fn(**test_point))
+
+
+@pytest.mark.parametrize("shift", [1.5, np.array([-0.5, 1, 0.3])])
+@pytest.mark.parametrize("scale", [2.0, np.array([1.5, 3.3, 1.0])])
+def test_multivariate_transform(shift, scale):
+    mu = np.array([0, 0.9, -2.1])
+    cov = np.array([[1, 0, 0.9], [0, 1, 0], [0.9, 0, 1]])
+    x_rv_raw = pt.random.multivariate_normal(mu, cov=cov)
+    x_rv = shift + x_rv_raw * scale
+    x_rv.name = "x"
+
+    x_vv = x_rv.clone()
+    logp = factorized_joint_logprob({x_rv: x_vv})[x_vv]
+    assert_no_rvs(logp)
+
+    x_vv_test = np.array([5.0, 4.9, -6.3])
+    scale_mat = scale * np.eye(x_vv_test.shape[0])
+    np.testing.assert_almost_equal(
+        logp.eval({x_vv: x_vv_test}),
+        sp.stats.multivariate_normal.logpdf(
+            x_vv_test,
+            shift + mu * scale,
+            scale_mat @ cov @ scale_mat.T,
+        ),
+    )

@@ -39,40 +39,105 @@ import warnings
 from collections import deque
 from typing import Dict, List, Optional, Sequence, Union
 
+import numpy as np
 import pytensor
 import pytensor.tensor as pt
 
 from pytensor import config
-from pytensor.graph.basic import graph_inputs, io_toposort
+from pytensor.graph.basic import Variable, graph_inputs, io_toposort
 from pytensor.graph.op import compute_test_value
 from pytensor.graph.rewriting.basic import GraphRewriter, NodeRewriter
 from pytensor.tensor.random.op import RandomVariable
 from pytensor.tensor.var import TensorVariable
+from typing_extensions import TypeAlias
 
-from pymc.logprob.abstract import _logprob, get_measurable_outputs
-from pymc.logprob.abstract import logprob as logp_logprob
+from pymc.logprob.abstract import (
+    _icdf_helper,
+    _logcdf_helper,
+    _logprob,
+    _logprob_helper,
+    get_measurable_outputs,
+)
 from pymc.logprob.rewriting import construct_ir_fgraph
 from pymc.logprob.transforms import RVTransform, TransformValuesRewrite
 from pymc.logprob.utils import rvs_to_value_vars
 
+TensorLike: TypeAlias = Union[Variable, float, np.ndarray]
 
-def logp(rv: TensorVariable, value) -> TensorVariable:
+
+def _warn_rvs_in_inferred_graph(graph: Sequence[TensorVariable]):
+    """Issue warning if any RVs are found in graph.
+
+    RVs are usually an (implicit) conditional input of the derived probability expression,
+    and meant to be replaced by respective value variables before evaluation.
+    However, when the IR graph is built, any non-input nodes (including RVs) are cloned,
+    breaking the link with the original ones.
+    This makes it impossible (or difficult) to replace it by the respective values afterward,
+    so we instruct users to do it beforehand.
+    """
+    from pymc.testing import assert_no_rvs
+
+    try:
+        assert_no_rvs(graph)
+    except AssertionError:
+        warnings.warn(
+            "RandomVariables were found in the derived graph. "
+            "These variables are a clone and do not match the original ones on identity.\n"
+            "If you are deriving a quantity that depends on model RVs, use `model.replace_rvs_by_values` first. For example: "
+            "`logp(model.replace_rvs_by_values([rv])[0], value)`",
+            stacklevel=3,
+        )
+
+
+def logp(
+    rv: TensorVariable, value: TensorLike, warn_missing_rvs: bool = True, **kwargs
+) -> TensorVariable:
     """Return the log-probability graph of a Random Variable"""
 
     value = pt.as_tensor_variable(value, dtype=rv.dtype)
     try:
-        return logp_logprob(rv, value)
+        return _logprob_helper(rv, value, **kwargs)
     except NotImplementedError:
-        try:
-            value = rv.type.filter_variable(value)
-        except TypeError as exc:
-            raise TypeError(
-                "When RV is not a pure distribution, value variable must have the same type"
-            ) from exc
-        try:
-            return factorized_joint_logprob({rv: value}, warn_missing_rvs=False)[value]
-        except Exception as exc:
-            raise NotImplementedError("PyMC could not infer logp of input variable.") from exc
+        fgraph, _, _ = construct_ir_fgraph({rv: value})
+        [(ir_rv, ir_value)] = fgraph.preserve_rv_mappings.rv_values.items()
+        expr = _logprob_helper(ir_rv, ir_value, **kwargs)
+        if warn_missing_rvs:
+            _warn_rvs_in_inferred_graph(expr)
+        return expr
+
+
+def logcdf(
+    rv: TensorVariable, value: TensorLike, warn_missing_rvs: bool = True, **kwargs
+) -> TensorVariable:
+    """Create a graph for the log-CDF of a Random Variable."""
+    value = pt.as_tensor_variable(value, dtype=rv.dtype)
+    try:
+        return _logcdf_helper(rv, value, **kwargs)
+    except NotImplementedError:
+        # Try to rewrite rv
+        fgraph, rv_values, _ = construct_ir_fgraph({rv: value})
+        [ir_rv] = fgraph.outputs
+        expr = _logcdf_helper(ir_rv, value, **kwargs)
+        if warn_missing_rvs:
+            _warn_rvs_in_inferred_graph(expr)
+        return expr
+
+
+def icdf(
+    rv: TensorVariable, value: TensorLike, warn_missing_rvs: bool = True, **kwargs
+) -> TensorVariable:
+    """Create a graph for the inverse CDF of a  Random Variable."""
+    value = pt.as_tensor_variable(value, dtype="floatX")
+    try:
+        return _icdf_helper(rv, value, **kwargs)
+    except NotImplementedError:
+        # Try to rewrite rv
+        fgraph, rv_values, _ = construct_ir_fgraph({rv: value})
+        [ir_rv] = fgraph.outputs
+        expr = _icdf_helper(ir_rv, value, **kwargs)
+        if warn_missing_rvs:
+            _warn_rvs_in_inferred_graph(expr)
+        return expr
 
 
 def factorized_joint_logprob(
@@ -92,10 +157,10 @@ def factorized_joint_logprob(
 
     .. code-block:: python
 
-        import pytensor.tensor as at
+        import pytensor.tensor as pt
 
-        sigma2_rv = at.random.invgamma(0.5, 0.5)
-        Y_rv = at.random.normal(0, at.sqrt(sigma2_rv))
+        sigma2_rv = pt.random.invgamma(0.5, 0.5)
+        Y_rv = pt.random.normal(0, pt.sqrt(sigma2_rv))
 
     This graph for ``Y_rv`` is equivalent to the following hierarchical model:
 
@@ -104,11 +169,11 @@ def factorized_joint_logprob(
         \sigma^2 \sim& \operatorname{InvGamma}(0.5, 0.5) \\
         Y \sim& \operatorname{N}(0, \sigma^2)
 
-    If we create a value variable for ``Y_rv``, i.e. ``y_vv = at.scalar("y")``,
+    If we create a value variable for ``Y_rv``, i.e. ``y_vv = pt.scalar("y")``,
     the graph of ``factorized_joint_logprob({Y_rv: y_vv})`` is equivalent to the
     conditional probability :math:`\log p(Y = y \mid \sigma^2)`, with a stochastic
     ``sigma2_rv``. If we specify a value variable for ``sigma2_rv``, i.e.
-    ``s_vv = at.scalar("s2")``, then ``factorized_joint_logprob({Y_rv: y_vv, sigma2_rv: s_vv})``
+    ``s_vv = pt.scalar("s2")``, then ``factorized_joint_logprob({Y_rv: y_vv, sigma2_rv: s_vv})``
     yields the joint log-probability of the two variables.
 
     .. math::
@@ -189,7 +254,8 @@ def factorized_joint_logprob(
             if warn_missing_rvs:
                 warnings.warn(
                     "Found a random variable that was neither among the observations "
-                    f"nor the conditioned variables: {node.outputs}"
+                    f"nor the conditioned variables: {outputs}.\n"
+                    "This variables is a clone and does not match the original one on identity."
                 )
             continue
 

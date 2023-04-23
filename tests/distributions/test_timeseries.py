@@ -39,13 +39,12 @@ from pymc.distributions.timeseries import (
     MvStudentTRandomWalk,
     RandomWalk,
 )
-from pymc.logprob.joint_logprob import logp
+from pymc.logprob.basic import logp
 from pymc.model import Model
 from pymc.pytensorf import floatX
 from pymc.sampling.forward import draw, sample_posterior_predictive
 from pymc.sampling.mcmc import sample
-from tests.distributions.util import assert_moment_is_expected
-from tests.helpers import select_by_precision
+from pymc.testing import assert_moment_is_expected, select_by_precision
 
 # Turn all warnings into errors for this module
 # Ignoring NumPy deprecation warning tracked in https://github.com/pymc-devs/pytensor/issues/146

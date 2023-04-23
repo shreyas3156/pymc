@@ -2,23 +2,10 @@ name: tests
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/tests.yml"
-      - "pymc/**.py"
-      - "*.py"
-      - "conda-envs/**"
-      - "codecov.yml"
-      - "requirements*.txt"
-      - "scripts/*.sh"
   push:
-    branches: [main]
-    paths:
-      - ".github/workflows/tests.yml"
-      - "pymc/**.py"
-      - "*.py"
-      - "conda-envs/**"
-      - "codecov.yml"
-      - "scripts/*.sh"
+    branches:
+      - main
+
 
 # Tests are split into multiple jobs to accelerate the CI.
 # Different jobs should be organized to take approximately the same
@@ -30,12 +17,38 @@ on:
 # enforces that test run just once per OS / floatX setting.
 
 jobs:
+
+  changes:
+    name: "Check for changes"
+    runs-on: ubuntu-latest
+    outputs:
+      changes: ${{ steps.changes.outputs.src }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            src:
+              - ".github/workflows/tests.yml"
+              - "pymc/**/*.py"
+              - "tests/**/*.py"
+              - "*.py"
+              - "conda-envs/*"
+              - "requirements*.txt"
+              - "codecov.yml"
+              - "scripts/*.sh"
+
   ubuntu:
+    needs: changes
+    if: ${{ needs.changes.outputs.changes == 'true' }}
     strategy:
       matrix:
         os: [ubuntu-20.04]
         floatx: [float64]
-        python-version: ["3.10"]
+        python-version: ["3.11"]
         test-subset:
           - |
             tests/test_util.py
@@ -47,6 +60,7 @@ jobs:
             tests/test_func_utils.py
             tests/distributions/test_shape_utils.py
             tests/distributions/test_mixture.py
+            tests/test_testing.py
 
           - |
             tests/distributions/test_continuous.py
@@ -75,6 +89,7 @@ jobs:
           - |
             tests/distributions/test_timeseries.py
             tests/gp/test_cov.py
+            tests/gp/test_hsgp_approx.py
             tests/gp/test_gp.py
             tests/gp/test_mean.py
             tests/gp/test_util.py
@@ -88,10 +103,10 @@ jobs:
             tests/backends/test_mcbackend.py
             tests/distributions/test_truncated.py
             tests/logprob/test_abstract.py
+            tests/logprob/test_basic.py
             tests/logprob/test_censoring.py
             tests/logprob/test_composite_logprob.py
             tests/logprob/test_cumsum.py
-            tests/logprob/test_joint_logprob.py
             tests/logprob/test_mixture.py
             tests/logprob/test_rewriting.py
             tests/logprob/test_scan.py
@@ -158,7 +173,10 @@ jobs:
           env_vars: TEST_SUBSET
           name: ${{ matrix.os }} ${{ matrix.floatx }}
           fail_ci_if_error: false
+
   windows:
+    needs: changes
+    if: ${{ needs.changes.outputs.changes == 'true' }}
     strategy:
       matrix:
         os: [windows-latest]
@@ -231,7 +249,10 @@ jobs:
           env_vars: TEST_SUBSET
           name: ${{ matrix.os }} ${{ matrix.floatx }}
           fail_ci_if_error: false
+
   macos:
+    needs: changes
+    if: ${{ needs.changes.outputs.changes == 'true' }}
     strategy:
       matrix:
         os: [macos-latest]
@@ -307,12 +328,15 @@ jobs:
           env_vars: TEST_SUBSET
           name: ${{ matrix.os }} ${{ matrix.floatx }}
           fail_ci_if_error: false
+
   external_samplers:
+    needs: changes
+    if: ${{ needs.changes.outputs.changes == 'true' }}
     strategy:
       matrix:
         os: [ubuntu-20.04]
         floatx: [float64]
-        python-version: ["3.9"]
+        python-version: ["3.10"]
         test-subset:
           - tests/sampling/test_jax.py tests/sampling/test_mcmc_external.py
       fail-fast: false
@@ -377,12 +401,15 @@ jobs:
           env_vars: TEST_SUBSET
           name: JAX tests - ${{ matrix.os }} ${{ matrix.floatx }}
           fail_ci_if_error: false
+
   float32:
+    needs: changes
+    if: ${{ needs.changes.outputs.changes == 'true' }}
     strategy:
       matrix:
         os: [windows-latest]
         floatx: [float32]
-        python-version: ["3.10"]
+        python-version: ["3.11"]
         test-subset:
         - tests/sampling/test_mcmc.py tests/ode/test_ode.py tests/ode/test_utils.py
       fail-fast: false
@@ -446,3 +473,17 @@ jobs:
           env_vars: TEST_SUBSET
           name: ${{ matrix.os }} ${{ matrix.floatx }}
           fail_ci_if_error: false
+
+  all_tests:
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs: [ changes, ubuntu, windows, macos, external_samplers, float32 ]
+    steps:
+      - name: Check build matrix status
+        if: ${{ needs.changes.outputs.changes == 'true' &&
+                ( needs.ubuntu.result != 'success' ||
+                  needs.windows.result != 'success' ||
+                  needs.macos.result != 'success' ||
+                  needs.external_samplers.result != 'success' ||
+                  needs.float32.result != 'success' ) }}
+        run: exit 1
